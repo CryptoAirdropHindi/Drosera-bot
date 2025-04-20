@@ -116,8 +116,6 @@ nano drosera.toml
 echo -ne "${GREEN}Enter Private Key EVM: ${NC}"
 read -rs PRIVATE_KEY
 echo
-
-# Apply trap deployment
 DROSERA_PRIVATE_KEY="$PRIVATE_KEY" drosera apply || error_exit "Failed to apply Drosera configuration"
 
 
