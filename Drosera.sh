@@ -201,7 +201,7 @@ backup_node_systemd() {
     # Copy operator binary
     if [ -n "$operator_bin" ] && [ -f "$operator_bin" ]; then
         print_message $BLUE "Attempting to copy binary $operator_bin..."
-        if cp -v "$operator_bin" "$backup_dir/"; then
+        if cp -av "$operator_bin" "$backup_dir/"; then
             print_message $GREEN "Successfully copied binary $operator_bin"
             echo "OPERATOR_BIN_PATH=$operator_bin" > "$backup_dir/restore_info.txt"
         else
@@ -224,6 +224,7 @@ backup_node_systemd() {
     print_message $BLUE "Starting drosera.service..."
     sudo systemctl start drosera.service
     print_message $BLUE "--- Backup creation completed ---"
+    echo "$backup_archive"  # Output the archive path
     return 0
 }
 
@@ -231,35 +232,17 @@ backup_node_systemd() {
 backup_and_serve_systemd() {
     print_message $BLUE "--- Creating and serving backup via URL ---"
 
-    # 1. Create temporary backup directory
-    local backup_files_dir
-    backup_files_dir=$(backup_node_systemd) 
+    # Create backup archive and get path
+    local backup_archive
+    backup_archive=$(backup_node_systemd)
     local backup_exit_code=$?
     
-    if [[ $backup_exit_code -ne 0 ]] || [[ -z "$backup_files_dir" ]] || [[ ! -d "$backup_files_dir" ]]; then
-        print_message $RED "Failed to create backup directory. URL serving aborted."
-        sudo systemctl start drosera.service 2>/dev/null
+    if [[ $backup_exit_code -ne 0 ]] || [[ -z "$backup_archive" ]] || [[ ! -f "$backup_archive" ]]; then
+        print_message $RED "Failed to create backup archive. URL serving aborted."
         return 1
     fi
-    
-    print_message $BLUE "Backup files prepared in: $backup_files_dir"
-    
-    # 2. Create archive
-    local archive_name="drosera_backup_$(basename "$backup_files_dir" | sed 's/drosera_backup_//').tar.gz"
-    local archive_path="$HOME/$archive_name"
-    print_message $BLUE "Creating archive $archive_name..."
-    if ! tar czf "$archive_path" -C "$(dirname "$backup_files_dir")" "$(basename "$backup_files_dir")"; then
-        print_message $RED "Error creating archive $archive_path."
-        rm -rf "$backup_files_dir"
-        return 1
-    fi
-    print_message $GREEN "Archive created successfully: $archive_path"
-    
-    # 3. Clean temporary files
-    print_message $BLUE "Cleaning temporary files..."
-    rm -rf "$backup_files_dir"
 
-    # 4. Install dependencies
+    # Install dependencies
     install_python3 || return 1
     install_cloudflared || return 1
     if ! command -v nc &> /dev/null && ! command -v lsof &> /dev/null; then
@@ -267,7 +250,7 @@ backup_and_serve_systemd() {
         sudo apt-get update && sudo apt-get install -y netcat lsof
     fi
 
-    # 5. Start server and tunnel
+    # Start server and tunnel
     local PORT=8000
     local MAX_RETRIES=10
     local RETRY_COUNT=0
@@ -364,7 +347,7 @@ backup_and_serve_systemd() {
     # Show download URL
     print_message $GREEN "========================================================="
     print_message $GREEN "Backup download available at:"
-    print_message $YELLOW "$TUNNEL_URL/$(basename "$archive_path")"
+    print_message $YELLOW "$TUNNEL_URL/$(basename "$backup_archive")"
     print_message $GREEN "========================================================="
     print_message $YELLOW "Link will remain active while this script is running."
     print_message $YELLOW "Press Ctrl+C to stop server and exit."
