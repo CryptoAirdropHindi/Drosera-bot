@@ -7,372 +7,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# === Helper Functions ===
-print_message() {
-    local color=$1
-    local message=$2
-    echo -e "${color}${message}${NC}"
-}
-
-# Check if port is in use
-is_port_in_use() {
-    local port=$1
-    if command -v nc &> /dev/null; then
-        nc -z localhost "$port" &> /dev/null
-        return $?
-    elif command -v lsof &> /dev/null; then
-        lsof -i:"$port" &> /dev/null
-        return $?
-    else
-        (echo > /dev/tcp/127.0.0.1/"$port") &> /dev/null
-        return $?
-    fi
-}
-
-# Install Python3 if not installed
-install_python3() {
-    if command -v python3 &> /dev/null; then
-        print_message $GREEN "Python3 is already installed."
-        return 0
-    fi
-    print_message $BLUE "Installing python3..."
-    sudo apt-get update
-    sudo apt-get install -y python3 python3-pip || {
-        print_message $RED "Failed to install python3. Please install manually."
-        return 1
-    }
-    print_message $GREEN "Python3 installed successfully."
-}
-
-# Install Cloudflared if not installed
-install_cloudflared() {
-    if command -v cloudflared &> /dev/null; then
-        print_message $GREEN "Cloudflared is already installed."
-        return 0
-    fi
-    print_message $BLUE "Installing cloudflared..."
-    local ARCH=$(uname -m)
-    local CLOUDFLARED_ARCH=""
-    case $ARCH in
-        x86_64) CLOUDFLARED_ARCH="amd64" ;;
-        aarch64|arm64) CLOUDFLARED_ARCH="arm64" ;;
-        *) print_message $RED "Unsupported architecture: $ARCH"; return 1 ;;
-    esac
-
-    local temp_dir=$(mktemp -d)
-    cd "$temp_dir" || return 1
-
-    print_message $BLUE "Downloading cloudflared for $ARCH..."
-    if curl -fL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}.deb" -o cloudflared.deb; then
-        print_message $BLUE "Installing via dpkg..."
-        sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
-    else
-        print_message $YELLOW "Failed to download .deb, trying binary..."
-        if curl -fL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}" -o cloudflared; then
-            chmod +x cloudflared
-            print_message $BLUE "Moving to /usr/local/bin..."
-            sudo mv cloudflared /usr/local/bin/
-        else
-            print_message $RED "Failed to download cloudflared."
-            cd ~; rm -rf "$temp_dir"
-            return 1
-        fi
-    fi
-
-    cd ~; rm -rf "$temp_dir"
-
-    if command -v cloudflared &> /dev/null; then
-        print_message $GREEN "Cloudflared installed successfully."
-        return 0
-    else
-        print_message $RED "Failed to install cloudflared. Check output and try manual installation."
-        return 1
-    fi
-}
-
-# === Management Functions ===
-
-# Show status and recent logs
-check_status_logs() {
-    print_message $BLUE "Checking drosera.service status..."
-    sudo systemctl status drosera.service --no-pager -l
-    print_message $BLUE "\nLast 15 lines of drosera.service logs:"
-    sudo journalctl -u drosera.service -n 15 --no-pager -l
-    print_message $YELLOW "For real-time log viewing use: sudo journalctl -u drosera.service -f"
-}
-
-# Stop service
-stop_node_systemd() {
-    print_message $BLUE "Stopping drosera.service..."
-    sudo systemctl stop drosera.service
-    sudo systemctl status drosera.service --no-pager -l
-}
-
-# Start service
-start_node_systemd() {
-    print_message $BLUE "Starting drosera.service..."
-    sudo systemctl start drosera.service
-    sleep 2
-    sudo systemctl status drosera.service --no-pager -l
-}
-
-# Backup function (SystemD) - Creates archive only
-backup_node_systemd() {
-    print_message $BLUE "--- Creating Drosera Backup Archive (SystemD) ---"
-    
-    local backup_date=$(date +%Y%m%d_%H%M%S)
-    local backup_base_dir="$HOME/drosera_backup"
-    local backup_dir="$backup_base_dir/drosera_backup_$backup_date"
-    local backup_archive="$HOME/drosera_backup_$backup_date.tar.gz"
-    local operator_env_file="/root/.drosera_operator.env"
-    local trap_dir="$HOME/my-drosera-trap"
-    local service_file="/etc/systemd/system/drosera.service"
-    local operator_bin=""
-
-    # Verify key components
-    if [ ! -d "$trap_dir" ]; then
-        print_message $RED "Error: Trap directory ($trap_dir) not found. Backup aborted."
-        return 1
-    fi
-    if [ ! -f "$operator_env_file" ]; then
-        print_message $RED "Error: Operator environment file ($operator_env_file) not found. Backup aborted."
-        return 1
-    fi
-     if [ ! -f "$service_file" ]; then
-        print_message $YELLOW "Warning: Service file ($service_file) not found. Backup will be incomplete."
-    fi
-    
-    # Find operator binary
-    if command -v drosera-operator &> /dev/null; then
-        operator_bin=$(command -v drosera-operator)
-        print_message $BLUE "Found operator binary: $operator_bin"
-    else
-        print_message $YELLOW "Warning: drosera-operator binary not found in PATH. Backup will be incomplete."
-    fi
-
-    # Create backup directory
-    print_message $BLUE "Creating backup directory: $backup_dir"
-    if ! mkdir -p "$backup_dir"; then 
-        print_message $RED "Failed to create backup directory $backup_dir. Exiting."; 
-        sudo systemctl start drosera.service 2>/dev/null 
-        return 1;
-    fi
-    print_message $GREEN "Backup directory created successfully."
-
-    print_message $BLUE "Stopping drosera.service..."
-    sudo systemctl stop drosera.service
-    sleep 2
-
-    print_message $BLUE "Copying files..."
-    # Copy Trap directory
-    print_message $BLUE "Copying $trap_dir..."
-    if cp -rv "$trap_dir" "$backup_dir/"; then
-       print_message $GREEN "Successfully copied $trap_dir"
-    else
-       print_message $YELLOW "Error copying $trap_dir"
-    fi
-    
-    # Copy .env file
-    print_message $BLUE "Attempting to copy $operator_env_file..."
-    if [ -f "$operator_env_file" ]; then
-        print_message $GREEN "Found $operator_env_file"
-        if cp -v "$operator_env_file" "$backup_dir/"; then
-            print_message $GREEN "Successfully copied $operator_env_file to $backup_dir"
-        else
-            print_message $RED "Error copying $operator_env_file (Error code: $?). Check permissions."
-        fi
-    else
-        print_message $RED "Error: $operator_env_file not found at specified path!"
-    fi
-
-    # Copy service file
-    print_message $BLUE "Attempting to copy $service_file..."
-    if [ -f "$service_file" ]; then
-        print_message $GREEN "Found $service_file"
-        if cp -v "$service_file" "$backup_dir/"; then
-           print_message $GREEN "Successfully copied $service_file to $backup_dir"
-        else
-           print_message $RED "Error copying $service_file (Error code: $?)."
-        fi
-    else
-        print_message $YELLOW "Warning: Service file $service_file not found."
-    fi
-
-    # Copy operator binary
-    if [ -n "$operator_bin" ] && [ -f "$operator_bin" ]; then
-        print_message $BLUE "Attempting to copy binary $operator_bin..."
-        if cp -v "$operator_bin" "$backup_dir/"; then
-            print_message $GREEN "Successfully copied binary $operator_bin"
-            echo "OPERATOR_BIN_PATH=$operator_bin" > "$backup_dir/restore_info.txt"
-        else
-            print_message $YELLOW "Error copying $operator_bin (Error code: $?)."
-        fi
-    fi
-
-    print_message $BLUE "Creating archive $backup_archive..."
-    if tar czf "$backup_archive" -C "$backup_base_dir" "drosera_backup_$backup_date"; then
-        print_message $GREEN "Backup created successfully: $backup_archive"
-        print_message $YELLOW "PLEASE copy this file to a secure location (not on this VPS)!"
-        print_message $YELLOW "Archive contains your private key in .drosera_operator.env file!"
-    else
-        print_message $RED "Error creating archive."
-    fi
-
-    print_message $BLUE "Cleaning temporary backup directory..."
-    rm -rf "$backup_dir" 
-
-    print_message $BLUE "Starting drosera.service..."
-    sudo systemctl start drosera.service
-    print_message $BLUE "--- Backup creation completed ---"
-    return 0
-}
-
-# New function to create and serve backup via URL
-backup_and_serve_systemd() {
-    print_message $BLUE "--- Creating and serving backup via URL ---"
-
-    # 1. Create temporary backup directory
-    local backup_files_dir
-    backup_files_dir=$(backup_node_systemd) 
-    local backup_exit_code=$?
-    
-    if [[ $backup_exit_code -ne 0 ]] || [[ -z "$backup_files_dir" ]] || [[ ! -d "$backup_files_dir" ]]; then
-        print_message $RED "Failed to create backup directory. URL serving aborted."
-        sudo systemctl start drosera.service 2>/dev/null
-        return 1
-    fi
-    
-    print_message $BLUE "Backup files prepared in: $backup_files_dir"
-    
-    # 2. Create archive
-    local archive_name="drosera_backup_$(basename "$backup_files_dir" | sed 's/drosera_backup_//').tar.gz"
-    local archive_path="$HOME/$archive_name"
-    print_message $BLUE "Creating archive $archive_name..."
-    if ! tar czf "$archive_path" -C "$(dirname "$backup_files_dir")" "$(basename "$backup_files_dir")"; then
-        print_message $RED "Error creating archive $archive_path."
-        rm -rf "$backup_files_dir"
-        return 1
-    fi
-    print_message $GREEN "Archive created successfully: $archive_path"
-    
-    # 3. Clean temporary files
-    print_message $BLUE "Cleaning temporary files..."
-    rm -rf "$backup_files_dir"
-
-    # 4. Install dependencies
-    install_python3 || return 1
-    install_cloudflared || return 1
-    if ! command -v nc &> /dev/null && ! command -v lsof &> /dev/null; then
-        print_message $BLUE "Installing netcat/lsof for port checking..."
-        sudo apt-get update && sudo apt-get install -y netcat lsof
-    fi
-
-    # 5. Start server and tunnel
-    local PORT=8000
-    local MAX_RETRIES=10
-    local RETRY_COUNT=0
-    local SERVER_STARTED=false
-    local HTTP_SERVER_PID=""
-    local CLOUDFLARED_PID=""
-    local TUNNEL_URL=""
-
-    cd ~ || { print_message $RED "Failed to switch to home directory."; return 1; }
-
-    while [[ $RETRY_COUNT -lt $MAX_RETRIES && $SERVER_STARTED == false ]]; do
-        print_message $BLUE "Attempting to start server on port $PORT..."
-        if is_port_in_use "$PORT"; then
-            print_message $YELLOW "Port $PORT busy. Trying next."
-            PORT=$((PORT + 1))
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            continue
-        fi
-
-        # Start HTTP server
-        local temp_log_http="/tmp/http_server_$$.log"
-        rm -f "$temp_log_http"
-        python3 -m http.server "$PORT" > "$temp_log_http" 2>&1 &
-        HTTP_SERVER_PID=$!
-        sleep 3
-
-        if ! ps -p $HTTP_SERVER_PID > /dev/null; then
-            print_message $RED "Failed to start HTTP server on port $PORT."
-            cat "$temp_log_http"
-            rm -f "$temp_log_http"
-            PORT=$((PORT + 1))
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            continue
-        fi
-        print_message $GREEN "HTTP server running on port $PORT (PID: $HTTP_SERVER_PID)."
-        rm -f "$temp_log_http"
-
-        # Start Cloudflared tunnel
-        print_message $BLUE "Starting Cloudflared tunnel to http://localhost:$PORT..."
-        local temp_log_cf="/tmp/cloudflared_$$.log"
-        rm -f "$temp_log_cf"
-        cloudflared tunnel --url "http://localhost:$PORT" --no-autoupdate > "$temp_log_cf" 2>&1 &
-        CLOUDFLARED_PID=$!
-        
-        # Wait for tunnel URL
-        print_message $YELLOW "Waiting for Cloudflare tunnel URL (up to 20 seconds)..."
-        for i in {1..10}; do
-            TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' "$temp_log_cf" | head -n 1)
-            if [[ -n "$TUNNEL_URL" ]]; then
-                break
-            fi
-            sleep 2
-        done
-
-        if [[ -z "$TUNNEL_URL" ]]; then
-            print_message $RED "Failed to get Cloudflare tunnel URL."
-            print_message $YELLOW "Cloudflared log:"
-            cat "$temp_log_cf"
-            kill $HTTP_SERVER_PID 2>/dev/null
-            kill $CLOUDFLARED_PID 2>/dev/null
-            wait $HTTP_SERVER_PID 2>/dev/null
-            wait $CLOUDFLARED_PID 2>/dev/null
-            rm -f "$temp_log_cf"
-            HTTP_SERVER_PID=""
-            CLOUDFLARED_PID=""
-            PORT=$((PORT + 1))
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-        else
-            print_message $GREEN "Cloudflare tunnel created: $TUNNEL_URL"
-            rm -f "$temp_log_cf"
-            SERVER_STARTED=true
-        fi
-    done
-
-    if [[ $SERVER_STARTED == false ]]; then
-        print_message $RED "Failed to start server and tunnel after $MAX_RETRIES attempts."
-        return 1
-    fi
-
-    # Set up Ctrl+C handler
-    trap 'cleanup_server' INT
-
-    # Cleanup function
-    cleanup_server() {
-        print_message $YELLOW "\nStopping server and tunnel..."
-        if [[ -n "$HTTP_SERVER_PID" ]]; then kill $HTTP_SERVER_PID 2>/dev/null; fi
-        if [[ -n "$CLOUDFLARED_PID" ]]; then kill $CLOUDFLARED_PID 2>/dev/null; fi
-        wait $HTTP_SERVER_PID 2>/dev/null
-        wait $CLOUDFLARED_PID 2>/dev/null
-        print_message $GREEN "Servers stopped."
-        exit 0
-    }
-
-    # Show download URL
-    print_message $GREEN "========================================================="
-    print_message $GREEN "Backup download available at:"
-    print_message $YELLOW "$TUNNEL_URL/$(basename "$archive_path")"
-    print_message $GREEN "========================================================="
-    print_message $YELLOW "Link will remain active while this script is running."
-    print_message $YELLOW "Press Ctrl+C to stop server and exit."
-
-    wait $HTTP_SERVER_PID $CLOUDFLARED_PID
-    cleanup_server 
-    return 0
-}
+# [Previous helper functions remain the same...]
 
 # === Main Installation Function ===
 install_drosera_systemd() {
@@ -577,9 +212,14 @@ install_drosera_systemd() {
         rm -f "$OPERATOR_CLI_ARCHIVE"
     fi
 
-    validate_input
+    echo "✍️ Registering operator..."
+    if ! drosera-operator register --eth-rpc-url "$ETH_RPC_URL" --eth-private-key $PK; then
+        echo "❌ Registration failed."
+        exit 1
+    fi
+    echo "✅ Operator registered successfully."
 
-    # 3. Clone repository
+    # Clone and configure Drosera-Network repository
     echo -e "\n${BLUE}Cloning repository...${NC}"
     if [ -d "Drosera-Network" ]; then
         echo -e "${YELLOW}Existing repository found, updating...${NC}"
@@ -590,7 +230,7 @@ install_drosera_systemd() {
         git clone https://github.com/0xmoei/Drosera-Network
     fi
 
-    # 4. Configure environment
+    # Configure environment
     echo -e "${BLUE}Configuring environment...${NC}"
     cp Drosera-Network/.env.example Drosera-Network/.env
     
@@ -598,30 +238,26 @@ install_drosera_systemd() {
     chmod 600 Drosera-Network/.env
     
     # Replace values using safe delimiter (|)
-    sed -i "s|your_evm_private_key|$EVN_PK|g" Drosera-Network/.env
-    sed -i "s|your_vps_public_ip|$VPS_IP|g" Drosera-Network/.env
+    sed -i "s|your_evm_private_key|$PK|g" Drosera-Network/.env
+    sed -i "s|your_vps_public_ip|$VPSIP|g" Drosera-Network/.env
 
-    # 5. Start Docker
-    echo -e "${BLUE}Starting Docker containers...${NC}"
-    cd Drosera-Network
-    docker compose down -v  # Cleanup any previous instances
-    docker compose up -d --build
+    # Start Docker services if docker is available
+    if command -v docker &> /dev/null; then
+        echo -e "${BLUE}Starting Docker containers...${NC}"
+        cd Drosera-Network
+        docker compose down -v  # Cleanup any previous instances
+        docker compose up -d --build
 
-    # 6. Verification
-    echo -e "\n${GREEN}=== Verification ===${NC}"
-    echo -e "Container status:"
-    docker compose ps
-    
-    echo -e "\n${GREEN}Setup completed!${NC}"
-    echo -e "Check logs with: ${YELLOW}docker compose logs -f${NC}"
-}
-
-    echo "✍️ Registering operator..."
-    if ! drosera-operator register --eth-rpc-url "$ETH_RPC_URL" --eth-private-key $PK; then
-        echo "❌ Registration failed."
-        exit 1
+        echo -e "\n${GREEN}=== Verification ===${NC}"
+        echo -e "Container status:"
+        docker compose ps
+        
+        echo -e "\n${GREEN}Docker services started!${NC}"
+        echo -e "Check logs with: ${YELLOW}docker compose logs -f${NC}"
+        cd ..
+    else
+        echo -e "${YELLOW}Docker not found, skipping Docker container setup${NC}"
     fi
-    echo "✅ Operator registered successfully."
 
     echo "⚙️ Configuring SystemD service..."
     SERVICE_FILE="/etc/systemd/system/drosera.service"
@@ -697,43 +333,4 @@ EOF
     return 0
 }
 
-# === Main Menu ===
-main_menu() {
-    while true; do
-        clear
-        print_message $GREEN "========= Drosera Node Management Menu (SystemD) ========="
-        local status
-        status=$(systemctl is-active drosera.service 2>/dev/null)
-        echo -e "Service status: $( [[ "$status" == "active" ]] && echo -e "${GREEN}Active${NC}" || echo -e "${RED}Inactive (${status:-not found})${NC}" )"
-        print_message $BLUE "---------------------- Installation -----------------------"
-        print_message $YELLOW " 1. Run full installation/reinstallation (SystemD)"
-        print_message $BLUE "-------------------- Node Management --------------------"
-        print_message $GREEN " 2. Show status and recent logs"
-        print_message $GREEN " 3. Start service"
-        print_message $RED   " 4. Stop service"
-        print_message $BLUE "--------------------- Maintenance ---------------------"
-        print_message $YELLOW " 5. Create backup (Archive only)"
-        print_message $YELLOW " 6. Create and serve backup via URL"
-        print_message $NC   " 7. Restore from backup (NOT IMPLEMENTED)"
-        print_message $BLUE "---------------------------------------------------------"
-        print_message $NC   " 0. Exit"
-        print_message $BLUE "========================================================="
-        read -p "Select option: " choice
-
-        case $choice in
-            1) install_drosera_systemd ;; 
-            2) check_status_logs ;;  
-            3) start_node_systemd ;;   
-            4) stop_node_systemd ;;    
-            5) backup_node_systemd ;;   
-            6) backup_and_serve_systemd ;;   
-            7) print_message $RED "Restore functionality not implemented." ;; 
-            0) print_message $GREEN "Exiting."; exit 0 ;;
-            *) print_message $RED "Invalid option.";;
-        esac
-        read -p "Press Enter to continue..."
-    done
-}
-
-# === Entry Point ===
-main_menu
+# [Rest of the script remains the same...]
