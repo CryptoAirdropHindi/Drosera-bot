@@ -201,7 +201,7 @@ backup_node_systemd() {
     # Copy operator binary
     if [ -n "$operator_bin" ] && [ -f "$operator_bin" ]; then
         print_message $BLUE "Attempting to copy binary $operator_bin..."
-        if cp -av "$operator_bin" "$backup_dir/"; then
+        if cp -v "$operator_bin" "$backup_dir/"; then
             print_message $GREEN "Successfully copied binary $operator_bin"
             echo "OPERATOR_BIN_PATH=$operator_bin" > "$backup_dir/restore_info.txt"
         else
@@ -224,7 +224,6 @@ backup_node_systemd() {
     print_message $BLUE "Starting drosera.service..."
     sudo systemctl start drosera.service
     print_message $BLUE "--- Backup creation completed ---"
-    echo "$backup_archive"  # Output the archive path
     return 0
 }
 
@@ -232,17 +231,35 @@ backup_node_systemd() {
 backup_and_serve_systemd() {
     print_message $BLUE "--- Creating and serving backup via URL ---"
 
-    # Create backup archive and get path
-    local backup_archive
-    backup_archive=$(backup_node_systemd)
+    # 1. Create temporary backup directory
+    local backup_files_dir
+    backup_files_dir=$(backup_node_systemd) 
     local backup_exit_code=$?
     
-    if [[ $backup_exit_code -ne 0 ]] || [[ -z "$backup_archive" ]] || [[ ! -f "$backup_archive" ]]; then
-        print_message $RED "Failed to create backup archive. URL serving aborted."
+    if [[ $backup_exit_code -ne 0 ]] || [[ -z "$backup_files_dir" ]] || [[ ! -d "$backup_files_dir" ]]; then
+        print_message $RED "Failed to create backup directory. URL serving aborted."
+        sudo systemctl start drosera.service 2>/dev/null
         return 1
     fi
+    
+    print_message $BLUE "Backup files prepared in: $backup_files_dir"
+    
+    # 2. Create archive
+    local archive_name="drosera_backup_$(basename "$backup_files_dir" | sed 's/drosera_backup_//').tar.gz"
+    local archive_path="$HOME/$archive_name"
+    print_message $BLUE "Creating archive $archive_name..."
+    if ! tar czf "$archive_path" -C "$(dirname "$backup_files_dir")" "$(basename "$backup_files_dir")"; then
+        print_message $RED "Error creating archive $archive_path."
+        rm -rf "$backup_files_dir"
+        return 1
+    fi
+    print_message $GREEN "Archive created successfully: $archive_path"
+    
+    # 3. Clean temporary files
+    print_message $BLUE "Cleaning temporary files..."
+    rm -rf "$backup_files_dir"
 
-    # Install dependencies
+    # 4. Install dependencies
     install_python3 || return 1
     install_cloudflared || return 1
     if ! command -v nc &> /dev/null && ! command -v lsof &> /dev/null; then
@@ -250,7 +267,7 @@ backup_and_serve_systemd() {
         sudo apt-get update && sudo apt-get install -y netcat lsof
     fi
 
-    # Start server and tunnel
+    # 5. Start server and tunnel
     local PORT=8000
     local MAX_RETRIES=10
     local RETRY_COUNT=0
@@ -347,7 +364,7 @@ backup_and_serve_systemd() {
     # Show download URL
     print_message $GREEN "========================================================="
     print_message $GREEN "Backup download available at:"
-    print_message $YELLOW "$TUNNEL_URL/$(basename "$backup_archive")"
+    print_message $YELLOW "$TUNNEL_URL/$(basename "$archive_path")"
     print_message $GREEN "========================================================="
     print_message $YELLOW "Link will remain active while this script is running."
     print_message $YELLOW "Press Ctrl+C to stop server and exit."
@@ -559,6 +576,45 @@ install_drosera_systemd() {
         echo "✅ Operator installed successfully."
         rm -f "$OPERATOR_CLI_ARCHIVE"
     fi
+
+    validate_input
+
+    # 3. Clone repository
+    echo -e "\n${BLUE}Cloning repository...${NC}"
+    if [ -d "Drosera-Network" ]; then
+        echo -e "${YELLOW}Existing repository found, updating...${NC}"
+        cd Drosera-Network
+        git pull origin main
+        cd ..
+    else
+        git clone https://github.com/0xmoei/Drosera-Network
+    fi
+
+    # 4. Configure environment
+    echo -e "${BLUE}Configuring environment...${NC}"
+    cp Drosera-Network/.env.example Drosera-Network/.env
+    
+    # Secure file permissions
+    chmod 600 Drosera-Network/.env
+    
+    # Replace values using safe delimiter (|)
+    sed -i "s|your_evm_private_key|$EVN_PK|g" Drosera-Network/.env
+    sed -i "s|your_vps_public_ip|$VPS_IP|g" Drosera-Network/.env
+
+    # 5. Start Docker
+    echo -e "${BLUE}Starting Docker containers...${NC}"
+    cd Drosera-Network
+    docker compose down -v  # Cleanup any previous instances
+    docker compose up -d --build
+
+    # 6. Verification
+    echo -e "\n${GREEN}=== Verification ===${NC}"
+    echo -e "Container status:"
+    docker compose ps
+    
+    echo -e "\n${GREEN}Setup completed!${NC}"
+    echo -e "Check logs with: ${YELLOW}docker compose logs -f${NC}"
+}
 
     echo "✍️ Registering operator..."
     if ! drosera-operator register --eth-rpc-url "$ETH_RPC_URL" --eth-private-key $PK; then
