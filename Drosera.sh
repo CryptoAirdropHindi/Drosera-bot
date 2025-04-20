@@ -1,185 +1,161 @@
 #!/bin/bash
 
-# ========== Colors ==========
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
+echo "CREATED JANETF.ETH"
+echo "Drosera auto install"
 
-# ========== Utilities ==========
-error_exit() {
-    echo -e "${RED}[ERROR] $1${NC}" >&2
-    exit 1
-}
+# 1. User inputs
+read -p "Enter your GitHub email: " GHEMAIL
+read -p "Enter your GitHub username: " GHUSER
+read -p "Enter your Drosera private key (starts with 0x): " PK
+read -p "Enter your VPS public IP: " VPSIP
+read -p "Do you want to use custom RPC endpoints? (y/n): " USE_CUSTOM_RPC
+if [[ $USE_CUSTOM_RPC =~ ^[Yy]$ ]]; then
+    read -p "Enter your primary Holesky RPC URL: " PRIMARY_RPC_URL
+    read -p "Enter your backup Holesky RPC URL (press Enter to skip): " BACKUP_RPC_URL
+    
+    if [ -z "$PRIMARY_RPC_URL" ]; then
+        print_error "Primary RPC URL cannot be empty"
+        exit 1
+    fi
+else
+    PRIMARY_RPC_URL="https://ethereum-holesky-rpc.publicnode.com"
+    BACKUP_RPC_URL="https://1rpc.io/holesky"
+fi
 
-info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+if [[ -z "$PK" || -z "$VPSIP" || -z "$GHEMAIL" || -z "$GHUSER" ]]; then
+  echo "❌ Missing info. All fields are required."
+  exit 1
+fi
 
-prompt_hidden_input() {
-    echo -ne "$1"
-    stty -echo
-    read -r INPUT
-    stty echo
-    echo
-    echo "$INPUT"
-}
+# 2. Install dependencies
+echo "📦 Installing dependencies..."
+sudo apt-get update && sudo apt-get upgrade -y
+sudo apt install curl ufw iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip libleveldb-dev -y
 
-# ========== Banner ==========
-clear
-echo -e "${CYAN}"
-echo "██████╗ ██████╗  ██████╗ ███████╗███████╗██████╗  █████╗"
-echo "██╔══██╗██╔══██╗██╔════╝ ██╔════╝██╔════╝██╔══██╗██╔══██╗"
-echo "██║  ██║██████╔╝██║  ███╗█████╗  █████╗  ██████╔╝███████║"
-echo "██║  ██║██╔═══╝ ██║   ██║██╔══╝  ██╔══╝  ██╔═══╝ ██╔══██║"
-echo "██████╔╝██║     ╚██████╔╝███████╗███████╗██║     ██║  ██║"
-echo "╚═════╝ ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚═╝     ╚═╝  ╚═╝"
-echo -e "${NC}\n"
+# 3. Install Drosera CLI
+curl -L https://app.drosera.io/install | bash
+source ~/.bashrc
+droseraup
 
-echo -e "${YELLOW}Welcome to the Drosera Network Installer${NC}"
-echo -e "Telegram: ${CYAN}@CryptoAirdropHindi${NC}"
-echo -e "GitHub:   ${CYAN}github.com/CryptoAirdropHindi${NC}\n"
+# 4. Install Foundry CLI
+curl -L https://foundry.paradigm.xyz | bash
+source ~/.bashrc
+foundryup
 
-# ========== Menu ==========
-show_menu() {
-    echo -e "${GREEN}1) Full Node + Deploy Trap"
-    echo "2) Run Operator Only"
-    echo "3) Setup with Docker"
-    echo -e "4) Quit${NC}"
-    echo -ne "${YELLOW}Select an option (1-4): ${NC}"
-}
+# 5. Install Bun
+curl -fsSL https://bun.sh/install | bash
+source ~/.bashrc
 
-# ========== Setup Full Node + Trap ==========
-setup_full_node_trap() {
-    info "Installing dependencies..."
-    sudo apt update && sudo apt upgrade -y
-    sudo apt install curl git build-essential ufw jq nano unzip lz4 wget gcc make tmux -y || error_exit "Dependency installation failed"
+# 6. Set up drosera trap project
+mkdir -p ~/my-drosera-trap && cd ~/my-drosera-trap
+git config --global user.email "$GHEMAIL"
+git config --global user.name "$GHUSER"
+forge init -t drosera-network/trap-foundry-template
 
-    info "Installing Docker..."
-    curl -fsSL https://get.docker.com | bash || error_exit "Docker installation failed"
+# 7. Build trap
+bun install
+forge build
 
-    info "Installing Drosera CLI..."
-    curl -sL https://app.drosera.io/install | bash || error_exit "Drosera CLI installation failed"
-    source ~/.bashrc
-    export PATH="$HOME/.drosera/bin:$PATH"
-    command -v drosera || error_exit "Drosera not found"
+# 8. Deploy Trap (1st apply)
+echo "Deploying trap to Holesky, your wallet need balance of holesky eth buddy"
+DROSERA_PRIVATE_KEY=$PK drosera apply <<< "ofc"
 
-    info "Installing Foundry CLI..."
-    curl -L https://foundry.paradigm.xyz | bash || error_exit "Foundry install failed"
-    source ~/.bashrc
-    export PATH="$HOME/.foundry/bin:$PATH"
-    foundryup || error_exit "Foundry update failed"
+# 9. Edit drosera.toml to whitelist operator
+echo "Whitelisting operator..."
+cd ~/my-drosera-trap
+read -p "📬 Enter the PUBLIC address linked to your used private key (starts with 0x): " OP_ADDR
 
-    info "Installing Bun..."
-    curl -fsSL https://bun.sh/install | bash || error_exit "Bun install failed"
-    source ~/.bashrc
-    export BUN_INSTALL="$HOME/.bun"
-    export PATH="$BUN_INSTALL/bin:$PATH"
+if [[ -z "$OP_ADDR" ]]; then
+  echo "❌ Public address is required to whitelist operator."
+  exit 1
+fi
+echo -e '\nprivate_trap = true\nwhitelist = ["'"$OP_ADDR"'"]' >> drosera.toml
 
-    info "Cloning and setting up Trap..."
-    mkdir -p ~/my-drosera-trap && cd ~/my-drosera-trap
-    read -rp "${CYAN}GitHub Email: ${NC}" GITHUB_EMAIL
-    read -rp "${CYAN}GitHub Username: ${NC}" GITHUB_USERNAME
-    git config --global user.email "$GITHUB_EMAIL"
-    git config --global user.name "$GITHUB_USERNAME"
+# 10. Deploy Trap again (2nd apply)
+echo "Re-applying trap config with whitelist..."
+DROSERA_PRIVATE_KEY=$PK drosera apply <<< "ofc"
 
-    forge init -t drosera-network/trap-foundry-template || error_exit "Trap init failed"
-    bun install || error_exit "Bun packages failed"
-    forge build || error_exit "Trap build failed"
+# 11. Download operator binary
+cd ~
+curl -LO https://github.com/drosera-network/releases/releases/download/v1.16.2/drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
+tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
+sudo cp drosera-operator /usr/bin
+chmod +x /usr/bin/drosera-operator
 
-    info "Edit trap config"
-    read -rp "${GREEN}Press Enter to open 'drosera.toml'...${NC}"
-    nano drosera.toml
+# 12. Register operator
+echo "Registering operator..."
+drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key $PK
 
-    PRIVATE_KEY=$(prompt_hidden_input "${GREEN}Enter Private Key (EVM): ${NC}")
-    [[ -z "$PRIVATE_KEY" ]] && error_exit "Private key cannot be empty"
+# 13. Open ports
+sudo ufw disable
 
-    info "Deploying Trap..."
-    DROSERA_PRIVATE_KEY="$PRIVATE_KEY" drosera apply || error_exit "Drosera apply failed"
+# 14. Create systemd service
+echo "Setting up systemd service..."
 
-    info "Setup complete. Please deposit Holesky ETH to the trap and Opt-in later."
-}
+# Check if the user is root or not
+CURRENT_USER=$(whoami)
+if [ "$CURRENT_USER" != "root" ]; then
+  USER=$CURRENT_USER
+else
+  USER="root"
+fi
 
-# ========== Run Operator ==========
-run_operator_only() {
-    PRIVATE_KEY=$(prompt_hidden_input "${GREEN}Enter Private Key (EVM): ${NC}")
-    VPS_IP=$(read -p "Enter VPS Public IP: " && echo "$REPLY")
-    [[ -z "$PRIVATE_KEY" || -z "$VPS_IP" ]] && error_exit "Missing key or IP"
-
-    info "Installing Operator CLI..."
-    cd ~
-    curl -LO https://github.com/drosera-network/releases/releases/download/v1.16.2/drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
-    tar -xvf drosera-operator-v1.16.2-x86_64-unknown-linux-gnu.tar.gz
-    sudo mv drosera-operator /usr/bin/
-    chmod +x /usr/bin/drosera-operator
-
-    info "Registering Operator..."
-    drosera-operator register --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com --eth-private-key "$PRIVATE_KEY" || error_exit "Registration failed"
-
-    info "Setting up systemd service..."
-    sudo tee /etc/systemd/system/drosera.service > /dev/null <<EOF
+# Use the username dynamically instead of hardcoding root
+sudo tee /etc/systemd/system/drosera.service > /dev/null <<EOF
 [Unit]
-Description=Drosera Operator
-After=network.target
+Description=drosera node service
+After=network-online.target
 
 [Service]
 User=$USER
-ExecStart=/usr/bin/drosera-operator node --db-file-path=$HOME/.drosera.db \
-  --network-p2p-port=31313 --server-port=31314 \
-  --eth-rpc-url=https://ethereum-holesky-rpc.publicnode.com \
-  --eth-backup-rpc-url=https://1rpc.io/holesky \
-  --drosera-address=0xea08f7d533C2b9A62F40D5326214f39a8E3A32F8 \
-  --eth-private-key=$PRIVATE_KEY \
-  --listen-address=0.0.0.0 \
-  --network-external-p2p-address=$VPS_IP \
-  --disable-dnr-confirmation=true
 Restart=always
-RestartSec=10
+RestartSec=15
+LimitNOFILE=65535
+ExecStart=/usr/bin/drosera-operator node --db-file-path /home/$USER/.drosera.db --network-p2p-port 31313 --server-port 31314 \\
+    --eth-rpc-url https://ethereum-holesky-rpc.publicnode.com \\
+    --eth-backup-rpc-url https://1rpc.io/holesky \\
+    --drosera-address 0xea08f7d533C2b9A62F40D5326214f39a8E3A32F8 \\
+    --eth-private-key $PK \\
+    --listen-address 0.0.0.0 \\
+    --network-external-p2p-address $VPSIP \\
+    --disable-dnr-confirmation true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable drosera
-    sudo systemctl start drosera || error_exit "Failed to start operator"
+# 15. Start systemd service
+sudo systemctl daemon-reload
+sudo systemctl enable drosera
+sudo systemctl start drosera
 
-    info "Operator setup complete"
-    echo -e "${CYAN}Use 'journalctl -u drosera.service -f' to monitor logs.${NC}"
-}
+# ⚠️ Trap must be deployed at this point!
 
-# ========== Docker Setup ==========
-docker_setup() {
-    info "Installing Docker..."
-    curl -fsSL https://get.docker.com | bash || error_exit "Docker install failed"
-    
-    info "Cloning Docker repo..."
-    git clone https://github.com/0xmoei/Drosera-Network || error_exit "Clone failed"
-    cd Drosera-Network || error_exit "Missing directory"
+# Parse deployed trap address from drosera apply log
+TRAP_ADDR=$(cat ~/.drosera/deployments.json | jq -r '.[0].trapAddress')
 
-    cp .env.example .env
-    nano .env
+if [[ -z "$TRAP_ADDR" || "$TRAP_ADDR" == "null" ]]; then
+  echo "❌ Could not auto-detect trap address. Please check manually in the Drosera dashboard."
+  exit 1
+fi
 
-    info "Starting containers..."
-    docker compose up -d || error_exit "Docker start failed"
+BLOOM_URL="https://app.drosera.io/trap?trapId=$TRAP_ADDR"
 
-    info "Docker setup complete"
-    echo -e "${CYAN}Logs: docker compose logs -f${NC}"
-}
+echo ""
+echo "🌱 Your trap has been deployed at: $TRAP_ADDR"
+echo "💸 You MUST send Bloom Boost to it before continuing."
+echo "🧭 Go to this link in your browser and click 'Send Bloom Boost':"
+echo ""
+echo "👉 $BLOOM_URL"
+echo ""
+read -p "⏳ Press Enter once you've sent the Bloom Boost..."
 
-# ========== Main Loop ==========
-while true; do
-    show_menu
-    read -r OPTION
-    case $OPTION in
-        1) setup_full_node_trap ;;
-        2) run_operator_only ;;
-        3) docker_setup ;;
-        4) echo -e "${MAGENTA}Goodbye!${NC}"; exit 0 ;;
-        *) echo -e "${RED}Invalid option!${NC}";;
-    esac
-    echo
-    read -rp "${GREEN}Press Enter to return to menu...${NC}"
-done
+# 16. Run dryrun
+echo "📡 Running drosera dryrun..."
+drosera dryrun
+
+# 17. Done
+echo ""
+echo "✅ All done. Node running via systemd."
+echo "💻 Logs: journalctl -u drosera -f"
+echo "🌐 Dashboard: https://app.drosera.io"
