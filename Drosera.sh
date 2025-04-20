@@ -63,13 +63,8 @@ DROSERA_PRIVATE_KEY=$PK drosera apply <<< "ofc"
 # 9. Edit drosera.toml to whitelist operator
 echo "Whitelisting operator..."
 cd ~/my-drosera-trap
-read -p "📬 Enter the PUBLIC address linked to your used private key (starts with 0x): " OP_ADDR
+nano drosera.toml
 
-if [[ -z "$OP_ADDR" ]]; then
-  echo "❌ Public address is required to whitelist operator."
-  exit 1
-fi
-echo -e '\nprivate_trap = true\nwhitelist = ["'"$OP_ADDR"'"]' >> drosera.toml
 
 # 10. Deploy Trap again (2nd apply)
 echo "Re-applying trap config with whitelist..."
