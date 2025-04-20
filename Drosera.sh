@@ -112,13 +112,21 @@ echo -e "${CYAN}Please configure your Drosera trap in 'drosera.toml'...${NC}"
 read -rp "$(echo -e "${GREEN}Press Enter to open the config file...${NC}")"
 nano drosera.toml
 
-# Prompt for private key
-echo -ne "${GREEN}Enter Private Key EVM: ${NC}"
-read -rs PRIVATE_KEY
+echo -e "${GREEN}Enter Private Key EVM (input hidden): ${NC}"
+stty -echo
+read PRIVATE_KEY
+stty echo
 echo
-DROSERA_PRIVATE_KEY="$PRIVATE_KEY" drosera apply || error_exit "Failed to apply Drosera configuration"
 
+if [ -z "$PRIVATE_KEY" ]; then
+  echo -e "${RED}Private key was empty. Exiting.${NC}"
+  exit 1
+fi
 
+DROSERA_PRIVATE_KEY="$PRIVATE_KEY" drosera apply || {
+  echo -e "${RED}Failed to apply Drosera configuration${NC}"
+  exit 1
+}
     echo -e "${CYAN}Please login on website: https://app.drosera.io/${NC}"
     echo -e "${CYAN}Connect your wallet and configure your trap${NC}"
     read -rp "${GREEN}Press Enter to continue after setting up your trap...${NC}"
