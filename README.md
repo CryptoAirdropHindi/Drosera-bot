@@ -53,3 +53,33 @@ docker compose up -d
 **Now running your node using `Docker`, you can Jump to step 7.**
 
 ---
+
+### 6-2-3: Check Node Health
+```console
+journalctl -u drosera.service -f
+```
+
+![image](https://github.com/user-attachments/assets/a4ad6e66-4749-4780-9347-c878399d4067)
+
+> !! No problem if you are receiveing `WARN drosera_services::network::service: Failed to gossip message: InsufficientPeers`
+
+### 6-2-4: Optional commands
+```console
+# Stop node
+sudo systemctl stop drosera
+
+# Restart node
+sudo systemctl restart drosera
+```
+**Now running your node using `SystemD`, you can Jump to step 7.**
+---
+
+## 7. Opt-in Trap
+In the dashboard., Click on `Opti in` to connect your operator to the Trap
+
+![image](https://github.com/user-attachments/assets/5189b5cb-cb46-4d10-938a-33f71951dfc2)
+
+---
+
+## 8. Check Node Liveness
+Your node will start producing greeen blocks in the dashboard
